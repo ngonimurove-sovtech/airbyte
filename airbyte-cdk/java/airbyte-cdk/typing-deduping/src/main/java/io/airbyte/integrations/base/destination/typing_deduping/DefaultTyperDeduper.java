@@ -5,14 +5,14 @@
 package io.airbyte.integrations.base.destination.typing_deduping;
 
 import static io.airbyte.cdk.integrations.base.IntegrationRunner.TYPE_AND_DEDUPE_THREAD_NAME;
-import static io.airbyte.cdk.integrations.util.ConnectorExceptionUtil.getResultsOrLogAndThrowFirst;
 import static io.airbyte.integrations.base.destination.typing_deduping.FutureUtils.*;
 import static io.airbyte.integrations.base.destination.typing_deduping.FutureUtils.reduceExceptions;
 import static java.util.Collections.singleton;
+import static java.util.stream.Collectors.toMap;
 
 import io.airbyte.cdk.integrations.destination.StreamSyncSummary;
-import io.airbyte.commons.concurrency.CompletableFutures;
-import io.airbyte.commons.functional.Either;
+import io.airbyte.integrations.base.destination.typing_deduping.migrators.Migration;
+import io.airbyte.integrations.base.destination.typing_deduping.migrators.MinimumDestinationState;
 import io.airbyte.protocol.models.v0.DestinationSyncMode;
 import io.airbyte.protocol.models.v0.StreamDescriptor;
 import java.util.HashSet;
@@ -21,7 +21,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -49,7 +48,7 @@ import org.slf4j.LoggerFactory;
  * Note that #prepareTables() initializes some internal state. The other methods will throw an
  * exception if that method was not called.
  */
-public class DefaultTyperDeduper implements TyperDeduper {
+public class DefaultTyperDeduper<DestinationState extends MinimumDestinationState> implements TyperDeduper {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(TyperDeduper.class);
 
@@ -57,10 +56,11 @@ public class DefaultTyperDeduper implements TyperDeduper {
   private static final String TMP_OVERWRITE_TABLE_SUFFIX = "_airbyte_tmp";
 
   private final SqlGenerator sqlGenerator;
-  private final DestinationHandler destinationHandler;
+  private final DestinationHandler<DestinationState> destinationHandler;
 
   private final DestinationV1V2Migrator v1V2Migrator;
   private final V2TableMigrator v2TableMigrator;
+  private final List<Migration<DestinationState>> migrations;
   private final ParsedCatalog parsedCatalog;
   private Set<StreamId> overwriteStreamsWithTmpTable;
   private final Set<Pair<String, String>> streamsWithSuccessfulSetup;
@@ -77,17 +77,20 @@ public class DefaultTyperDeduper implements TyperDeduper {
   private final Map<StreamId, Lock> internalTdLocks;
 
   private final ExecutorService executorService;
+  private List<DestinationInitialState<DestinationState>> destinationInitialStates;
 
   public DefaultTyperDeduper(final SqlGenerator sqlGenerator,
-                             final DestinationHandler destinationHandler,
+                             final DestinationHandler<DestinationState> destinationHandler,
                              final ParsedCatalog parsedCatalog,
                              final DestinationV1V2Migrator v1V2Migrator,
-                             final V2TableMigrator v2TableMigrator) {
+                             final V2TableMigrator v2TableMigrator,
+                             final List<Migration<DestinationState>> migrations) {
     this.sqlGenerator = sqlGenerator;
     this.destinationHandler = destinationHandler;
     this.parsedCatalog = parsedCatalog;
     this.v1V2Migrator = v1V2Migrator;
     this.v2TableMigrator = v2TableMigrator;
+    this.migrations = migrations;
     this.initialRawTableStateByStream = new ConcurrentHashMap<>();
     this.streamsWithSuccessfulSetup = ConcurrentHashMap.newKeySet(parsedCatalog.streams().size());
     this.tdLocks = new ConcurrentHashMap<>();
@@ -96,20 +99,45 @@ public class DefaultTyperDeduper implements TyperDeduper {
         new BasicThreadFactory.Builder().namingPattern(TYPE_AND_DEDUPE_THREAD_NAME).build());
   }
 
-  public DefaultTyperDeduper(final SqlGenerator sqlGenerator,
-                             final DestinationHandler destinationHandler,
+  public DefaultTyperDeduper(
+                             final SqlGenerator sqlGenerator,
+                             final DestinationHandler<DestinationState> destinationHandler,
                              final ParsedCatalog parsedCatalog,
-                             final DestinationV1V2Migrator v1V2Migrator) {
-    this(sqlGenerator, destinationHandler, parsedCatalog, v1V2Migrator, new NoopV2TableMigrator());
+                             final DestinationV1V2Migrator v1V2Migrator,
+                             final List<Migration<DestinationState>> migrations) {
+    this(sqlGenerator, destinationHandler, parsedCatalog, v1V2Migrator, new NoopV2TableMigrator(), migrations);
   }
 
   @Override
-  public void prepareSchemasAndRawTables() {
+  public void prepareSchemasAndRawTables() throws Exception {
     // Technically kind of weird to call this here, but it's the best place we have.
     // Ideally, we'd create just airbyte_internal here, and defer creating the final table schemas
     // until prepareFinalTables... but it doesn't really matter.
     TyperDeduperUtil.prepareSchemas(sqlGenerator, destinationHandler, parsedCatalog);
-    TyperDeduperUtil.executeRawTableMigrations(executorService, sqlGenerator, destinationHandler, v1V2Migrator, v2TableMigrator, parsedCatalog);
+
+    TyperDeduperUtil.executeWeirdMigrations(
+        executorService,
+        sqlGenerator,
+        destinationHandler,
+        v1V2Migrator,
+        v2TableMigrator,
+        parsedCatalog);
+
+    destinationInitialStates = TyperDeduperUtil.executeRawTableMigrations(
+        executorService,
+        destinationHandler,
+        migrations,
+        destinationHandler.gatherInitialState(parsedCatalog.streams()));
+
+    // Commit our destination states immediately.
+    // Technically, migrations aren't done until we execute the soft reset.
+    // However, our state contains a needsSoftReset flag, so we can commit that we already executed the
+    // migration
+    // and even if we fail to run the soft reset in this sync, future syncs will see the soft reset flag
+    // and finish it for us.
+    destinationHandler.commitDestinationStates(destinationInitialStates.stream().collect(toMap(
+        state -> state.streamConfig().id(),
+        DestinationInitialState::destinationState)));
   }
 
   @Override
@@ -120,25 +148,19 @@ public class DefaultTyperDeduper implements TyperDeduper {
     overwriteStreamsWithTmpTable = ConcurrentHashMap.newKeySet();
     LOGGER.info("Preparing tables");
 
-    final List<DestinationInitialState> initialStates = destinationHandler.gatherInitialState(parsedCatalog.streams());
-    final List<Either<? extends Exception, Void>> prepareTablesFutureResult = CompletableFutures.allOf(
-        initialStates.stream().map(this::prepareTablesFuture).toList()).toCompletableFuture().join();
-    getResultsOrLogAndThrowFirst("The following exceptions were thrown attempting to prepare tables:\n", prepareTablesFutureResult);
+    final List<CompletableFuture<Optional<Exception>>> prepareTableFutures = destinationInitialStates.stream()
+        .map(this::prepareTablesFuture).toList();
+    CompletableFuture.allOf(prepareTableFutures.toArray(new CompletableFuture[0])).join();
+    FutureUtils.reduceExceptions(prepareTableFutures, "The following exceptions were thrown attempting to prepare tables:\n");
+
+    destinationHandler.commitDestinationStates(destinationInitialStates.stream().collect(toMap(
+        state -> state.streamConfig().id(),
+        // If we get here, then we've executed all soft resets. Force the soft reset flag to false.
+        state -> state.destinationState().withSoftReset(false))));
   }
 
-  private CompletionStage<Void> runMigrationsAsync(StreamConfig streamConfig) {
-    return CompletableFuture.runAsync(() -> {
-      try {
-        // Migrate the Raw Tables if this is the first v2 sync after a v1 sync
-        v1V2Migrator.migrateIfNecessary(sqlGenerator, destinationHandler, streamConfig);
-        v2TableMigrator.migrateIfNecessary(streamConfig);
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    }, this.executorService);
-  }
-
-  private CompletionStage<Void> prepareTablesFuture(final DestinationInitialState initialState) {
+  private CompletableFuture<Optional<Exception>> prepareTablesFuture(
+                                                                     final DestinationInitialState<DestinationState> initialState) {
     // For each stream, make sure that its corresponding final table exists.
     // Also, for OVERWRITE streams, decide if we're writing directly to the final table, or into an
     // _airbyte_tmp table.
@@ -160,9 +182,10 @@ public class DefaultTyperDeduper implements TyperDeduper {
               LOGGER.info("Final Table for stream {} is empty and matches the expected v2 format, writing to table directly",
                   stream.id().finalName());
             }
-
-          } else if (initialState.isSchemaMismatch()) {
-            // We're loading data directly into the existing table. Make sure it has the right schema.
+          } else if (initialState.isSchemaMismatch() || initialState.destinationState().needsSoftReset()) {
+            // We're loading data directly into the existing table.
+            // Make sure it has the right schema.
+            // Also, if a raw table migration wants us to do a soft reset, do that here.
             TypeAndDedupeTransaction.executeSoftReset(sqlGenerator, destinationHandler, stream);
           }
         } else {
@@ -184,10 +207,10 @@ public class DefaultTyperDeduper implements TyperDeduper {
         // immediately acquire the lock.
         internalTdLocks.put(stream.id(), new ReentrantLock());
 
-        return null;
+        return Optional.empty();
       } catch (final Exception e) {
         LOGGER.error("Exception occurred while preparing tables for stream " + stream.id().originalName(), e);
-        throw new RuntimeException(e);
+        return Optional.of(e);
       }
     }, this.executorService);
   }

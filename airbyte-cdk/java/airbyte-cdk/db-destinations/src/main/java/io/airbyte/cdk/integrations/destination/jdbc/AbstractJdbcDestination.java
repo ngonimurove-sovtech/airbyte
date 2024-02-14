@@ -37,6 +37,7 @@ import io.airbyte.integrations.base.destination.typing_deduping.NoopTyperDeduper
 import io.airbyte.integrations.base.destination.typing_deduping.NoopV2TableMigrator;
 import io.airbyte.integrations.base.destination.typing_deduping.ParsedCatalog;
 import io.airbyte.integrations.base.destination.typing_deduping.TyperDeduper;
+import io.airbyte.integrations.base.destination.typing_deduping.migrators.MinimumDestinationState;
 import io.airbyte.protocol.models.v0.AirbyteConnectionStatus;
 import io.airbyte.protocol.models.v0.AirbyteConnectionStatus.Status;
 import io.airbyte.protocol.models.v0.AirbyteMessage;
@@ -252,7 +253,8 @@ public abstract class AbstractJdbcDestination extends JdbcConnector implements D
 
   protected abstract JdbcSqlGenerator getSqlGenerator();
 
-  protected abstract JdbcDestinationHandler getDestinationHandler(final String databaseName, final JdbcDatabase database);
+  protected abstract JdbcDestinationHandler<? extends MinimumDestinationState> getDestinationHandler(final String databaseName,
+                                                                                                     final JdbcDatabase database);
 
   /**
    * "database" key at root of the config json, for any other variants in config, override this
@@ -316,14 +318,14 @@ public abstract class AbstractJdbcDestination extends JdbcConnector implements D
     final String databaseName = getDatabaseName(config);
     final var migrator = new JdbcV1V2Migrator(namingResolver, database, databaseName);
     final NoopV2TableMigrator v2TableMigrator = new NoopV2TableMigrator();
-    final DestinationHandler destinationHandler = getDestinationHandler(databaseName, database);
+    final DestinationHandler<? extends MinimumDestinationState> destinationHandler = getDestinationHandler(databaseName, database);
     final boolean disableTypeDedupe = config.has(DISABLE_TYPE_DEDUPE) && config.get(DISABLE_TYPE_DEDUPE).asBoolean(false);
     final TyperDeduper typerDeduper;
     if (disableTypeDedupe) {
-      typerDeduper = new NoOpTyperDeduperWithV1V2Migrations(sqlGenerator, destinationHandler, parsedCatalog, migrator, v2TableMigrator);
+      typerDeduper = new NoOpTyperDeduperWithV1V2Migrations<>(sqlGenerator, destinationHandler, parsedCatalog, migrator, v2TableMigrator, List.of());
     } else {
       typerDeduper =
-          new DefaultTyperDeduper(sqlGenerator, destinationHandler, parsedCatalog, migrator, v2TableMigrator);
+          new DefaultTyperDeduper<>(sqlGenerator, destinationHandler, parsedCatalog, migrator, v2TableMigrator, List.of());
     }
     return typerDeduper;
   }
