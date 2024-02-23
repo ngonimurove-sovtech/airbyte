@@ -181,31 +181,7 @@ public abstract class JdbcDestinationHandler<DestinationState> implements Destin
     // Use stream n/ns pair because we don't want to build the full StreamId here
     CompletableFuture<Map<AirbyteStreamNameNamespacePair, DestinationState>> destinationStatesFuture = CompletableFuture.supplyAsync(() -> {
       try {
-        // Guarantee the table exists.
-        jdbcDatabase.execute(
-            getDslContext().createTableIfNotExists(quotedName(rawTableSchemaName, DESTINATION_STATE_TABLE_NAME))
-                .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAME), SQLDataType.VARCHAR)
-                .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAMESPACE), SQLDataType.VARCHAR)
-                // Just use a string type, even if the destination has a json type.
-                // We're never going to query this column in a fancy way - all our processing can happen
-                // client-side.
-                .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_STATE), SQLDataType.VARCHAR)
-                // Add an updated_at field. We don't actually need it yet, but it can't hurt!
-                .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_UPDATED_AT), SQLDataType.TIMESTAMPWITHTIMEZONE)
-                .getSQL(ParamType.INLINED));
-        // Fetch all records from it. We _could_ filter down to just our streams... but meh. This is small
-        // data.
-        return jdbcDatabase.queryJsons(
-            getDslContext().select(
-                field(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAME)),
-                field(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAMESPACE)),
-                field(quotedName(DESTINATION_STATE_TABLE_COLUMN_STATE))).from(quotedName(rawTableSchemaName, DESTINATION_STATE_TABLE_NAME))
-                .getSQL())
-            .stream().collect(toMap(
-                record -> new AirbyteStreamNameNamespacePair(
-                    record.get(DESTINATION_STATE_TABLE_COLUMN_NAME).asText(),
-                    record.get(DESTINATION_STATE_TABLE_COLUMN_NAMESPACE).asText()),
-                record -> toDestinationState(Jsons.deserialize(record.get(DESTINATION_STATE_TABLE_COLUMN_STATE).asText()))));
+        return getAllDestinationStates();
       } catch (SQLException e) {
         throw new RuntimeException(e);
       }
@@ -217,6 +193,39 @@ public abstract class JdbcDestinationHandler<DestinationState> implements Destin
     final List<Either<? extends Exception, DestinationInitialState<DestinationState>>> states =
         CompletableFutures.allOf(initialStates).toCompletableFuture().join();
     return ConnectorExceptionUtil.getResultsOrLogAndThrowFirst("Failed to retrieve initial state", states);
+  }
+
+  @NotNull
+  protected Map<AirbyteStreamNameNamespacePair, DestinationState> getAllDestinationStates() throws SQLException {
+    // Guarantee the table exists.
+    jdbcDatabase.execute(
+        getDslContext().createTableIfNotExists(quotedName(rawTableSchemaName, DESTINATION_STATE_TABLE_NAME))
+            .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAME), SQLDataType.VARCHAR)
+            .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAMESPACE), SQLDataType.VARCHAR)
+            // Just use a string type, even if the destination has a json type.
+            // We're never going to query this column in a fancy way - all our processing can happen
+            // client-side.
+            .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_STATE), SQLDataType.VARCHAR)
+            // Add an updated_at field. We don't actually need it yet, but it can't hurt!
+            .column(quotedName(DESTINATION_STATE_TABLE_COLUMN_UPDATED_AT), SQLDataType.TIMESTAMPWITHTIMEZONE)
+            .getSQL(ParamType.INLINED));
+    // Fetch all records from it. We _could_ filter down to just our streams... but meh. This is small
+    // data.
+    return jdbcDatabase.queryJsons(
+        getDslContext().select(
+            field(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAME)),
+            field(quotedName(DESTINATION_STATE_TABLE_COLUMN_NAMESPACE)),
+            field(quotedName(DESTINATION_STATE_TABLE_COLUMN_STATE))).from(quotedName(rawTableSchemaName, DESTINATION_STATE_TABLE_NAME))
+            .getSQL())
+        .stream().collect(toMap(
+            record -> {
+              final JsonNode nameNode = record.get(DESTINATION_STATE_TABLE_COLUMN_NAME);
+              final JsonNode namespaceNode = record.get(DESTINATION_STATE_TABLE_COLUMN_NAMESPACE);
+              return new AirbyteStreamNameNamespacePair(
+                  nameNode != null ? nameNode.asText() : null,
+                  namespaceNode != null ? namespaceNode.asText() : null);
+            },
+            record -> toDestinationState(Jsons.deserialize(record.get(DESTINATION_STATE_TABLE_COLUMN_STATE).asText()))));
   }
 
   private CompletionStage<DestinationInitialState<DestinationState>> retrieveState(final CompletableFuture<Map<AirbyteStreamNameNamespacePair, DestinationState>> destinationStatesFuture,
