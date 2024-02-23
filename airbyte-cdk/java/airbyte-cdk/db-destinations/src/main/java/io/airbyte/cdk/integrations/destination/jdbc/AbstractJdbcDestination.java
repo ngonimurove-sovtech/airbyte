@@ -4,6 +4,7 @@
 
 package io.airbyte.cdk.integrations.destination.jdbc;
 
+import static io.airbyte.cdk.integrations.base.JavaBaseConstants.DEFAULT_AIRBYTE_INTERNAL_NAMESPACE;
 import static io.airbyte.cdk.integrations.base.errors.messages.ErrorMessage.getErrorMessage;
 import static io.airbyte.cdk.integrations.util.ConfiguredCatalogUtilKt.addDefaultNamespaceToStreams;
 
@@ -17,7 +18,6 @@ import io.airbyte.cdk.integrations.JdbcConnector;
 import io.airbyte.cdk.integrations.base.AirbyteMessageConsumer;
 import io.airbyte.cdk.integrations.base.AirbyteTraceMessageUtility;
 import io.airbyte.cdk.integrations.base.Destination;
-import io.airbyte.cdk.integrations.base.JavaBaseConstants;
 import io.airbyte.cdk.integrations.base.SerializedAirbyteMessageConsumer;
 import io.airbyte.cdk.integrations.base.TypingAndDedupingFlag;
 import io.airbyte.cdk.integrations.destination.NamingConventionTransformer;
@@ -46,6 +46,7 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 import javax.sql.DataSource;
@@ -94,7 +95,7 @@ public abstract class AbstractJdbcDestination extends JdbcConnector implements D
       attemptTableOperations(outputSchema, database, namingResolver, sqlOperations, false);
       if (TypingAndDedupingFlag.isDestinationV2()) {
         final var v2RawSchema = namingResolver.getIdentifier(TypingAndDedupingFlag.getRawNamespaceOverride(RAW_SCHEMA_OVERRIDE)
-            .orElse(JavaBaseConstants.DEFAULT_AIRBYTE_INTERNAL_NAMESPACE));
+            .orElse(DEFAULT_AIRBYTE_INTERNAL_NAMESPACE));
         attemptTableOperations(v2RawSchema, database, namingResolver, sqlOperations, false);
         destinationSpecificTableOperations(database);
       }
@@ -254,7 +255,8 @@ public abstract class AbstractJdbcDestination extends JdbcConnector implements D
   protected abstract JdbcSqlGenerator getSqlGenerator();
 
   protected abstract JdbcDestinationHandler<? extends MinimumDestinationState> getDestinationHandler(final String databaseName,
-                                                                                                     final JdbcDatabase database);
+                                                                                                     final JdbcDatabase database,
+                                                                                                     final String rawTableSchema);
 
   /**
    * "database" key at root of the config json, for any other variants in config, override this
@@ -311,14 +313,15 @@ public abstract class AbstractJdbcDestination extends JdbcConnector implements D
    */
   private TyperDeduper getV2TyperDeduper(final JsonNode config, final ConfiguredAirbyteCatalog catalog, final JdbcDatabase database) {
     final JdbcSqlGenerator sqlGenerator = getSqlGenerator();
-    final ParsedCatalog parsedCatalog = TypingAndDedupingFlag.getRawNamespaceOverride(RAW_SCHEMA_OVERRIDE)
+    Optional<String> rawNamespaceOverride = TypingAndDedupingFlag.getRawNamespaceOverride(RAW_SCHEMA_OVERRIDE);
+    final ParsedCatalog parsedCatalog = rawNamespaceOverride
         .map(override -> new CatalogParser(sqlGenerator, override))
         .orElse(new CatalogParser(sqlGenerator))
         .parseCatalog(catalog);
     final String databaseName = getDatabaseName(config);
     final var migrator = new JdbcV1V2Migrator(namingResolver, database, databaseName);
     final NoopV2TableMigrator v2TableMigrator = new NoopV2TableMigrator();
-    final DestinationHandler<? extends MinimumDestinationState> destinationHandler = getDestinationHandler(databaseName, database);
+    final DestinationHandler<? extends MinimumDestinationState> destinationHandler = getDestinationHandler(databaseName, database, rawNamespaceOverride.orElse(DEFAULT_AIRBYTE_INTERNAL_NAMESPACE));
     final boolean disableTypeDedupe = config.has(DISABLE_TYPE_DEDUPE) && config.get(DISABLE_TYPE_DEDUPE).asBoolean(false);
     final TyperDeduper typerDeduper;
     if (disableTypeDedupe) {
