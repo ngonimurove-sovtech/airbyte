@@ -93,7 +93,7 @@ public abstract class JdbcDestinationHandler<DestinationState> implements Destin
   }
 
   private Optional<TableDefinition> findExistingTable(final StreamId id) throws Exception {
-    return findExistingTable(id);
+    return findExistingTable(jdbcDatabase, databaseName, id.finalNamespace(), id.finalName());
   }
 
   private boolean isFinalTableEmpty(final StreamId id) throws Exception {
