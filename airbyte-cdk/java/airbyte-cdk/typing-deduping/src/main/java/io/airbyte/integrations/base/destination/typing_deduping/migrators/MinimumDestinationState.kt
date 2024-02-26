@@ -26,4 +26,18 @@ interface MinimumDestinationState {
    * ```
    */
   fun <T: MinimumDestinationState> withSoftReset(needsSoftReset: Boolean): T
+
+  /**
+   * A minimal implementation of [MinimumDestinationState]. This is useful for destinations that don't
+   * want to bother implementing a full state object.
+   */
+  data class Impl(val needsSoftReset: Boolean): MinimumDestinationState {
+    override fun needsSoftReset(): Boolean {
+      return needsSoftReset
+    }
+
+    override fun <T: MinimumDestinationState> withSoftReset(needsSoftReset: Boolean): T {
+      return copy(needsSoftReset = true) as T
+    }
+  }
 }
