@@ -1,4 +1,0 @@
-{
-    "name": "Airbyte Custom Codespace",
-    "dockerFile": "Dockerfile"
-}
