@@ -374,7 +374,7 @@ public class DefaultTyperDeduperTest {
     initialStates
         .forEach(initialState -> when(initialState.initialRawTableStatus()).thenReturn(new InitialRawTableStatus(true, false, Optional.empty())));
 
-    typerDeduper.prepareSchemasAndRawTables();
+    typerDeduper.prepareSchemasAndRunMigrations();
 
     typerDeduper.prepareFinalTables();
     clearInvocations(destinationHandler);
@@ -400,7 +400,7 @@ public class DefaultTyperDeduperTest {
     initialStates.forEach(initialState -> when(initialState.initialRawTableStatus())
         .thenReturn(new InitialRawTableStatus(true, true, Optional.of(Instant.parse("2023-01-23T12:34:56Z")))));
 
-    typerDeduper.prepareSchemasAndRawTables();
+    typerDeduper.prepareSchemasAndRunMigrations();
 
     typerDeduper.prepareFinalTables();
     clearInvocations(destinationHandler);
@@ -456,7 +456,7 @@ public class DefaultTyperDeduperTest {
                 false,
                 new MockState(false, false, true))));
 
-    typerDeduper.prepareSchemasAndRawTables();
+    typerDeduper.prepareSchemasAndRunMigrations();
     verify(destinationHandler).execute(Sql.of("MIGRATE airbyte_internal.overwrite_stream"));
     verify(destinationHandler).execute(Sql.of("MIGRATE airbyte_internal.append_stream"));
     verify(destinationHandler).execute(Sql.of("MIGRATE airbyte_internal.dedup_stream"));
@@ -530,7 +530,7 @@ public class DefaultTyperDeduperTest {
                 false,
                 new MockState(false, false, false))));
 
-    typerDeduper.prepareSchemasAndRawTables();
+    typerDeduper.prepareSchemasAndRunMigrations();
     verify(destinationHandler).execute(Sql.of("MIGRATE airbyte_internal.overwrite_stream"));
     verify(destinationHandler).execute(Sql.of("MIGRATE airbyte_internal.append_stream"));
     verify(destinationHandler).execute(Sql.of("MIGRATE airbyte_internal.dedup_stream"));
@@ -598,7 +598,7 @@ public class DefaultTyperDeduperTest {
                 false,
                 new MockState(true, false, false))));
 
-    typerDeduper.prepareSchemasAndRawTables();
+    typerDeduper.prepareSchemasAndRunMigrations();
     // Even though we didn't do anything, we still commit the destination states.
     // This is technically unnecessary, but it's a single extra call and it's simpler to just do it.
     verify(destinationHandler).commitDestinationStates(Map.of(
