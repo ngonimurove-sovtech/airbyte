@@ -96,6 +96,25 @@ public class MsSQLTestDatabase extends TestDatabase<MSSQLServerContainer<?>, MsS
     return self();
   }
 
+  public void waitForCdcRecords(String schemaName, String tableName, int recordCount)
+      throws SQLException {
+    String sql = "SELECT count(*) FROM cdc.%s_%s_ct".formatted(schemaName, tableName);
+    int actualRecordCount;
+    int tryCount = 0;
+    do {
+      LOGGER.info(formatLogLine("fetching the number of CDC records for {}.{}"), schemaName, tableName);
+      actualRecordCount = query(ctx -> ctx.fetch(sql)).get(0).get(0, Integer.class);
+      LOGGER.info(formatLogLine("Found {} CDC records for {}.{}. Expecting {}. Trying again ({}/{}"), actualRecordCount, schemaName, tableName,
+          recordCount, tryCount, MAX_RETRIES);
+    } while (tryCount++ < MAX_RETRIES);
+    if (actualRecordCount >= recordCount) {
+      LOGGER.info(formatLogLine("found {} records after {} tries!"), actualRecordCount, tryCount);
+    } else {
+      throw new RuntimeException(
+          "failed to find %d records after %s seconds. Only found %d!".formatted(recordCount, MAX_RETRIES, actualRecordCount));
+    }
+  }
+
   public MsSQLTestDatabase withShortenedCapturePollingInterval() {
     return with("EXEC sys.sp_cdc_change_job @job_type = 'capture', @pollinginterval = %d;",
         MssqlCdcTargetPosition.MAX_LSN_QUERY_DELAY_TEST.toSeconds());
@@ -103,17 +122,17 @@ public class MsSQLTestDatabase extends TestDatabase<MSSQLServerContainer<?>, MsS
 
   private void waitForAgentState(final boolean running) {
     final String expectedValue = running ? "Running." : "Stopped.";
-    LOGGER.debug("Waiting for SQLServerAgent state to change to '{}'.", expectedValue);
+    LOGGER.info(formatLogLine("Waiting for SQLServerAgent state to change to '{}'."), expectedValue);
     for (int i = 0; i < MAX_RETRIES; i++) {
       try {
         final var r = query(ctx -> ctx.fetch("EXEC master.dbo.xp_servicecontrol 'QueryState', N'SQLServerAGENT';").get(0));
         if (expectedValue.equalsIgnoreCase(r.getValue(0).toString())) {
-          LOGGER.debug("SQLServerAgent state is '{}', as expected.", expectedValue);
+          LOGGER.info(formatLogLine("SQLServerAgent state is '{}', as expected."), expectedValue);
           return;
         }
-        LOGGER.debug("Retrying, SQLServerAgent state {} does not match expected '{}'.", r, expectedValue);
+        LOGGER.info(formatLogLine("Retrying, SQLServerAgent state {} does not match expected '{}'."), r, expectedValue);
       } catch (final SQLException e) {
-        LOGGER.debug("Retrying agent state query after catching exception {}.", e.getMessage());
+        LOGGER.info(formatLogLine("Retrying agent state query after catching exception {}."), e.getMessage());
       }
       try {
         Thread.sleep(1_000); // Wait one second between retries.
